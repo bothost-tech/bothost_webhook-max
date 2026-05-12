@@ -1,0 +1,93 @@
+# Эхо-бот MAX (вебхук) — деплой на Bothost
+
+Минимальный Flask-пример для статьи [«Вебхуки в MAX Bot API»](https://bothost.ru/blog/post/webhook-max-bot-api). Ниже — только то, как это стыкуется с **реальной** схемой Bothost (агент **agentv3**, API `api/bots.php`).
+
+## Как платформа запускает бота
+
+1. **Дашборд / API** создаёт запись бота и шлёт задание на **агент** выбранной ноды (`agent_url`).
+2. Агент **клонирует Git**, при отсутствии своего `Dockerfile` **генерирует** его (`main.py` → `generate_dockerfile` / `generate_python_dockerfile`), **собирает образ** и поднимает **контейнер**.
+3. Если у бота задан **домен**, в контейнер вешаются labels **Traefik**: правило `Host(\`<ваш_домен>\`)`, трафик идёт на порт **`internal_port`** (в Docker это `traefik.http.services.<router>-svc.loadbalancer.server.port`).
+4. В контейнер пробрасывается **`PORT`** — строка с тем же **внутренним портом**, на который смотрит Traefik. Процесс приложения должен слушать **`int(os.environ["PORT"])`** (в этом репозитории так и сделано; локально по умолчанию **8080**, если `PORT` не задан).
+
+Точка входа Python на агенте выбирается так: явное поле **`main_file`** из формы создания бота, иначе эвристика `find_main_python_file` (приоритет `main.py`, `app.py`, `bot.py`, …, затем файл с `if __name__ == "__main__"`). Для этого проекта достаточно **`echo_bot.py`** с блоком `__main__`.
+
+## Шаблон и платформа в кабинете
+
+- В форме создания бота шаблон **Python / `max-bot`** (`create-bot.php`).
+- В **API** (`api/bots.php`) для шаблона с подстрокой `max` выставляется **`platform`: `max`**. Именно это значение уходит в агент.
+
+## Переменные окружения, которые выставляет Bothost (агент)
+
+Источник: `agentv3/archive_deploy.py`, `agentv3/webhook_handler.py`, `agentv3/main.py` (создание/восстановление контейнера).
+
+| Переменная | Смысл |
+|------------|--------|
+| `BOT_TOKEN` | Токен из формы создания бота (как в UI). |
+| `MAX_TOKEN`, `MAX_BOT_TOKEN` | Дубли того же токена, если **`platform` = `max`**. Код примера читает **`MAX_BOT_TOKEN`**. |
+| `TOKEN`, `API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `BOT_API_TOKEN` | Тот же токен под разными именами для совместимости с библиотеками. |
+| `WEBHOOK_URL` | Если в карточке бота есть **`domain`**: **`https://<domain>/webhook`**. Если домена нет — пустая строка. Удобно скопировать в `POST /subscriptions` как URL вебхука. |
+| `PORT` | **`internal_port`** бота (в API по умолчанию **3000**, если не передан другой). |
+| `DOMAIN` | Домен из карточки бота. |
+| `BOT_ID`, `USER_ID`, `TEMPLATE` | Служебные поля Bothost. |
+| `DATA_DIR` | В сгенерированном Dockerfile для Python задаётся **`/app/data`**; туда монтируется volume **`bothost-data-<bot_id>`**. Эхо-боту не обязателен. |
+
+Пользовательские пары из формы (**environment variables**) **дописываются** в окружение контейнера поверх этого списка (`environment_variables` в payload → merge в `env_vars` на агенте).
+
+## Что задать вручную для этого примера
+
+1. **`WEBHOOK_SECRET`** — тот же `secret`, что в теле **`POST https://platform-api.max.ru/subscriptions`**. Платформа его **не генерирует**; добавьте ключ в дополнительные переменные окружения при создании/редактировании бота (в UI — блок пары ключ/значение). В коде сверяется заголовок **`X-Max-Bot-Api-Secret`**.
+2. При **401** на исходящие запросы к MAX — см. статью: опционально **`MAX_USE_BEARER=1`** (формат `Authorization`).
+
+## Домен и HTTPS (обязательно для вебхука MAX)
+
+- В форме нужно включить сценарий с **публичным HTTPS** (в UI описан как веб-доступ / webhook): тогда в карточке появится **`domain`**, Traefik отдаст TLS, а **`WEBHOOK_URL`** станет вида `https://<домен>/webhook`.
+- Логика **автодомена** `{id}.bothost.tech` в **`api/bots.php`**: при включённом веб-интерфейсе и **не** Free тарифе домен подставляется автоматически; на **Free** автоподдомен из этого условия **не** создаётся — нужен **свой поддомен** в поле домена (например `*.bothost.tech`) или тариф с автодоменом. Актуальные ограничения тарифов смотрите в интерфейсе Bothost.
+- **`internal_port`** в форме должен совпадать с портом процесса. По умолчанию в API **3000** — можно оставить как есть: приложение читает **`PORT`**.
+
+## Подписка MAX на URL Bothost
+
+После успешного деплоя и проверки **`GET https://<ваш_домен>/health`** (ответ `{"status":"ok"}`) вызовите **`POST /subscriptions`** на `platform-api.max.ru` с:
+
+- **`url`**: тот же путь, куда шлёт MAX, например **`https://<ваш_домен>/webhook`** (совпадает с **`WEBHOOK_URL`** из env, если путь везде `/webhook`);
+- **`secret`**: как в **`WEBHOOK_SECRET`**;
+- **`update_types`**: минимум `message_created` (см. официальную документацию MAX).
+
+Детали заголовка **`Authorization`**, ретраи и таймаут **30 с** — в [статье блога](https://bothost.ru/blog/post/webhook-max-bot-api) и на **dev.max.ru**.
+
+## Обновление только своих переменных
+
+В **`api/bots.php`** при **PATCH** обновлении `environment_variables` для пользователя с планом **Free** возвращается **403**, если передан непустой набор переменных. Добавление **`WEBHOOK_SECRET`** после создания на Free через этот API может быть недоступно — закладывайте секрет **при создании** бота или используйте платный тариф, если нужно менять env из API.
+
+## Локальный запуск (вне Bothost)
+
+```bash
+pip install -r requirements.txt
+export MAX_BOT_TOKEN="..."
+export WEBHOOK_SECRET="..."
+export PORT=8080   # опционально
+python echo_bot.py
+```
+
+---
+
+## Репозиторий GitHub (`bothost-tech/bothost_webhook-max`)
+
+Организация: [bothost-tech на GitHub](https://github.com/orgs/bothost-tech/repositories). Создать пустой репозиторий **`bothost_webhook-max`** может владелец организации (веб: **New repository** → Owner **bothost-tech** → имя **`bothost_webhook-max`** → без README/license, чтобы не конфликтовал первый push).
+
+После создания репозитория из каталога **`cfb/webhook-max`**:
+
+```bash
+git remote add origin https://github.com/bothost-tech/bothost_webhook-max.git
+git branch -M main
+git push -u origin main
+```
+
+С [GitHub CLI](https://cli.github.com/) (при установленном `gh` и авторизации с правами на org):
+
+```bash
+gh repo create bothost-tech/bothost_webhook-max --public --source=. --remote=origin --push
+```
+
+---
+
+Поведение MAX (формат **Update**, поля сообщения) меняется — при расхождениях с этим README приоритет у **официальной документации MAX**.
