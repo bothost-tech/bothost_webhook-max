@@ -2,6 +2,10 @@
 
 Минимальный Flask-пример для статьи [«Вебхуки в MAX Bot API»](https://bothost.ru/blog/post/webhook-max-bot-api). Ниже — только то, как это стыкуется с **реальной** схемой Bothost (агент **agentv3**, API `api/bots.php`).
 
+Публичный репозиторий с этим кодом: **[bothost-tech/bothost_webhook-max](https://github.com/bothost-tech/bothost_webhook-max)**.
+
+![Диалог в MAX: пользователь «Привет», бот «Эхо: Привет»](docs/webhook-max-echo-example.png)
+
 ## Как платформа запускает бота
 
 1. **Дашборд / API** создаёт запись бота и шлёт задание на **агент** выбранной ноды (`agent_url`).
