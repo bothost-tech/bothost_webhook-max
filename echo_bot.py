@@ -39,32 +39,61 @@ def api_headers():
 
 
 def extract_message_payload(data: dict):
-    """Возвращает (chat_id, text, mid) из Update или (None, None, None)."""
+    """Возвращает (user_id, chat_id, chat_type, text, mid) из Update или пять None.
+
+    Для POST /messages MAX: в личке (dialog) в query обычно нужен user_id отправителя;
+    в группе/канале — chat_id. См. https://dev.max.ru/docs-api/methods/POST/messages
+    и recipient.chat_type в Update.
+    """
     if data.get("update_type") != "message_created":
-        return None, None, None
+        return None, None, None, None, None
     msg = data.get("message")
     if not isinstance(msg, dict):
         logger.warning("message_created без объекта message: keys=%s", list(data.keys()))
-        return None, None, None
+        return None, None, None, None, None
     recipient = msg.get("recipient")
     if not isinstance(recipient, dict):
         logger.warning("Нет recipient; message keys=%s", list(msg.keys()))
-        return None, None, None
+        return None, None, None, None, None
     body = msg.get("body")
     if not isinstance(body, dict):
         logger.warning("Нет body; message=%s", json.dumps(msg, ensure_ascii=False)[:800])
-        return None, None, None
+        return None, None, None, None, None
     chat_id = recipient.get("chat_id")
+    chat_type = recipient.get("chat_type")
     text = (body.get("text") or "").strip()
     mid = body.get("mid")
-    return chat_id, text, mid
+    user_id = None
+    sender = msg.get("sender")
+    if isinstance(sender, dict) and not sender.get("is_bot"):
+        user_id = sender.get("user_id")
+    return user_id, chat_id, chat_type, text, mid
 
 
-def send_max_message(chat_id: int, text: str) -> None:
+def send_max_message(
+    user_id: int | None,
+    chat_id: int | None,
+    recipient_chat_type: str | None,
+    text: str,
+) -> None:
+    """POST /messages: user_id или chat_id в query (официальный пример MAX)."""
     url = f"{MAX_API}/messages"
-    body = {"chat_id": chat_id, "text": text}
+    params = {}
+    ct = (recipient_chat_type or "").strip().lower()
+    # Группа / канал — отвечаем в тот же чат
+    if ct in ("chat", "channel") and chat_id is not None:
+        params["chat_id"] = int(chat_id)
+    # Личка или неизвестный тип — сначала user_id отправителя (иначе бывает Unknown recipient)
+    elif user_id is not None:
+        params["user_id"] = int(user_id)
+    elif chat_id is not None:
+        params["chat_id"] = int(chat_id)
+    else:
+        logger.warning("send_max_message: нет user_id и chat_id, ответ не отправлен")
+        return
+    body = {"text": text}
     try:
-        r = requests.post(url, headers=api_headers(), json=body, timeout=15)
+        r = requests.post(url, headers=api_headers(), params=params, json=body, timeout=15)
         if not r.ok:
             logger.error("messages API: %s %s", r.status_code, r.text[:500])
     except requests.RequestException as e:
@@ -106,15 +135,20 @@ def webhook():
     update_type = data.get("update_type")
 
     if update_type == "message_created":
-        chat_id, user_text, mid = extract_message_payload(data)
+        user_id, chat_id, chat_type, user_text, mid = extract_message_payload(data)
         if mid and remember_mid(mid):
             logger.info("Пропуск дубликата по mid=%s", mid)
             return jsonify({"ok": True}), 200
-        if chat_id is not None and user_text:
-            send_max_message(int(chat_id), f"Эхо: {user_text}")
-        elif chat_id is None:
+        if user_text and (user_id is not None or chat_id is not None):
+            send_max_message(
+                int(user_id) if user_id is not None else None,
+                int(chat_id) if chat_id is not None else None,
+                str(chat_type) if chat_type is not None else None,
+                f"Эхо: {user_text}",
+            )
+        elif user_id is None and chat_id is None:
             logger.warning(
-                "Не удалось извлечь chat_id; payload=%s",
+                "Не удалось извлечь user_id/chat_id; payload=%s",
                 json.dumps(data, ensure_ascii=False)[:1200],
             )
 
