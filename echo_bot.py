@@ -88,9 +88,15 @@ def webhook():
     if request.method == "HEAD":
         return "", 200
 
-    got = request.headers.get("X-Max-Bot-Api-Secret", "")
-    if not WEBHOOK_SECRET or not hmac.compare_digest(got, WEBHOOK_SECRET):
-        return jsonify({"error": "forbidden"}), 403
+    # Секрет обязателен только если задан в окружении (иначе каждый POST давал бы 403 и MAX не доставлял бы события).
+    if WEBHOOK_SECRET:
+        got = request.headers.get("X-Max-Bot-Api-Secret", "")
+        if not hmac.compare_digest(got, WEBHOOK_SECRET):
+            return jsonify({"error": "forbidden"}), 403
+    else:
+        logger.warning(
+            "WEBHOOK_SECRET не задан — вебхук без проверки заголовка (только для отладки, в проде задайте secret)"
+        )
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
